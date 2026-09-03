@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.commons.lang3.StringUtils;
 import org.eclipse.core.resources.IProject;
@@ -60,7 +61,7 @@ public class GradleBuildClient implements BuildClient {
      * compile → didChange loops. When true, incoming didChange notifications
      * are ignored because a previous update cycle is still in progress.
      */
-    private static volatile boolean isUpdating = false;
+    private static final AtomicBoolean isUpdating = new AtomicBoolean();
 
     /**
      * The task name for the build server.
@@ -129,11 +130,6 @@ public class GradleBuildClient implements BuildClient {
     public void onBuildTargetDidChange(DidChangeBuildTarget params) {
         // Skip if an update cycle is already in progress to prevent re-entrant loops:
         // didChange → update → auto-build → compile → reloadWorkspace → didChange → ...
-        if (isUpdating) {
-            JavaLanguageServerPlugin.logInfo("Skipping didChange notification: update already in progress.");
-            return;
-        }
-
         Set<IProject> projects = new HashSet<>();
         for (BuildTargetEvent event : params.getChanges()) {
             BuildTargetIdentifier id = event.getTarget();
@@ -148,10 +144,14 @@ public class GradleBuildClient implements BuildClient {
             return;
         }
 
+        if (!isUpdating.compareAndSet(false, true)) {
+            JavaLanguageServerPlugin.logInfo("Skipping didChange notification: update already in progress.");
+            return;
+        }
+
         // Update projects in a new thread to avoid blocking the IO queue,
         // since some BSP requests will be sent during project updates.
         CompletableFuture.runAsync(() -> {
-            isUpdating = true;
             try {
                 // Wrap all classpath updates in a single workspace operation to prevent
                 // intermediate setRawClasspath() calls from each triggering auto-build.
@@ -173,7 +173,7 @@ public class GradleBuildClient implements BuildClient {
             } catch (CoreException e) {
                 JavaLanguageServerPlugin.logException("Failed to batch classpath updates", e);
             } finally {
-                isUpdating = false;
+                isUpdating.set(false);
             }
         });
     }
